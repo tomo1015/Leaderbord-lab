@@ -1,0 +1,29 @@
+services:
+  app:
+    image: golang:1.22
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - go-mod-cache:/go/pkg/mod
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_ADDR=redis:6379
+    # 開発用：ソースをマウントして go run。コードを直したら Ctrl-C → up し直すだけ。
+    command: go run .
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # ★実験1の初期状態：永続化を完全オフ（RDBもAOFも無効）
+    #   実験1後半で下記をコメントアウトして永続化を有効化していく。
+    command: redis-server --save "" --appendonly no
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
+  go-mod-cache:
