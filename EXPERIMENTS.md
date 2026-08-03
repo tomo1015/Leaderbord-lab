@@ -25,7 +25,10 @@ seeder は `docker compose exec app go run . -seed <件数>` で叩く。
 ```bash
 docker compose up -d
 docker compose exec app go run . -seed 10000
-docker compose exec redis redis-cli DBSIZE      # → 10000 のはず
+# ★注意: DBSIZE は「キーの数」で 1 を返す（全員が1つのZSETに入っているため）。
+#   メンバー数を見たいなら ZCARD を使う。
+docker compose exec redis redis-cli ZCARD leaderboard:global   # → 10000
+docker compose exec redis redis-cli DBSIZE                     # → 1
 ```
 
 ### ③ わざと壊す
@@ -33,13 +36,13 @@ Redis だけ再起動して、中身を確認する。
 
 ```bash
 docker compose restart redis
-docker compose exec redis redis-cli DBSIZE      # → ?
+docker compose exec redis redis-cli ZCARD leaderboard:global   # → ?
 ```
 
-観察を記録：__________（例：0 になった＝全消失）
+観察を記録：0になった（例：0 になった＝全消失）
 
 ### ④ なぜ？（一文で言語化）
-> 記入：__________
+> 記入：永続化を有効にしない限り、プロセスの再起動（電源が切れたとき）で全て消えるからRedisは真実の記録元（SOT）にはせず、その前に置く必要がある。
 > （ヒント：RAM は電源が切れれば消える。だから Redis は既定で「速さ」を取り、
 > 　永続化は明示的に足すオプション。＝真実の記録元にはしない設計）
 
@@ -51,16 +54,55 @@ docker compose exec redis redis-cli DBSIZE      # → ?
 - **AOF（追記ログ）**：`redis-server --appendonly yes --appendfsync everysec`
   → 毎秒 fsync。失う窓は最大1秒だが書き込みコストが乗る。
 
-各設定で seed → `docker compose kill redis` → `up` → `DBSIZE` を測り、
+各設定で seed → `docker compose kill redis` → `up` → `ZCARD leaderboard:global` を測り、
 「どれだけ残ったか（=失った窓）」を記録：
 
 | 設定 | kill 後に残った件数 | 失った窓 | 体感の書き込み速度 |
 |------|------|------|------|
-| 永続化オフ | | | |
-| RDB save 60 1000 | | | |
-| AOF everysec | | | |
+| 永続化オフ | 0 | 全て | 0.079ms |
+| RDB save 60 1000 |　2482 | 7518 | 0.079ms |
+| AOF everysec |　10000 | 0 | 0.071ms |
+| AOF always | 10001 | 0 | 0.559ms |
 
 **この表が「なぜ Redis を source of truth にしないか」の証拠になる。**
+
+### 観察結果①
+Redisのデータが消える要因は「永続化なしでのプロセス終了による揮発」と「メモリ上限での意図的な排除」の2つ
+永続化を有効にしても消失はゼロにならない。
+ROFまたはAOFの設定によって「失う窓」が縮むだけで耐久性は0か1ではなく、性能と引き換えにどれだけ喪失を許容するかを選ぶ連続的なトレードオフである。
+だからこそ、Redisは真実の記録元にはせず、その手前に置く速い揮発層として扱う。
+
+### 観察結果②
+RDB=点、AOF=線とするなら、非線形であり最大1秒の喪失（AOF everysec）までは書き込み速度をほぼ落とさないが、失った窓を0に近づける（AOF always）だと約8倍遅くなる。だから実務の定番はeverysec（ほぼタダで買える耐久性）である。
+
+### 最終的なまとめ
+Redisはデフォルトで揮発し、永続化しなければ再起動で全て消える（永続化なしでのプロセス終了による揮発）
+そのため真実の記録元（SOT）にはせず、その手前の層として使う。
+ただし、永続化を有効にしたからといって消失がゼロにはならない。
+ROBまたはAOFの設定によって「失う窓」が縮むだけで耐久性は0か1ではなく、性能と引き換えにどれだけ喪失を許容するかを選ぶ連続的なトレードオフである。
+また、RDBを点・AOFを線とするなら、非線形であることと最大1秒の喪失（AOF everysec）までは書き込み速度をほぼ落とさないが、「失った窓」を0に近づける（AOF always）だと約8倍遅くなる。
+実務での定番がeverysecなのは、書き込み速度と失う窓のトレードで最も良いから（ほぼタダで最大1秒まで縮められる）
+
+> 補足：「失う窓」の別表現
+RPO（Recovery Point Objective/目標復旧時点）
+→ 「障害時にどこまでのデータ喪失を許容するか」を時間で表す指標そのもの
+AOF everysec：RPO ≒ 1秒
+AOF always：RPO ≒ 0秒
+永続化オフ：RPO ≒ 無限大（全部）
+DR（災害復旧）や可用性設計では必ず出てくる用語
+
+↔︎ RTO（Recovery Time Objective/復旧までにかかる時間）
+
+RDB：復旧が早い（スナップショットを読むだけ）がRPOが大きい
+AOF：RPOが小さいが復旧が遅い（ログ再生がいる）
+
+より別の言い方
+data loss window（データ損失ウィンドウ）
+durability gap / durability window / exposure window（晒されている時間）
+
+つまり・・・
+窓の実態は「まだディスクにflushされていない、メモリ上だけの書き込みの溜まり」
+AOFのappendfsync間隔 = 窓の幅 （everysecが最大1秒であること）
 
 ---
 
