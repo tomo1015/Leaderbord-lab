@@ -11,8 +11,9 @@ services:
       - redis
     environment:
       - REDIS_ADDR=redis:6379
-    # 開発用：ソースをマウントして go run。コードを直したら Ctrl-C → up し直すだけ。
-    command: go run .
+    # コンテナは常時生存させ、API サーバも seeder も exec で起動する。
+    # こうすると「go run が落ちて exec が is not running になる」事故が原理的に起きない。
+    command: sleep infinity
 
   redis:
     image: redis:7-alpine
@@ -21,6 +22,9 @@ services:
     # ★実験1の初期状態：永続化を完全オフ（RDBもAOFも無効）
     #   実験1後半で下記をコメントアウトして永続化を有効化していく。
     command: redis-server --save "" --appendonly no
+    #command: redis-server --save "60 1000"
+    #command: redis-server --appendonly yes --appendfsync everysec
+    #command: redis-server --appendonly yes --appendfsync always
     volumes:
       - redis-data:/data
 
