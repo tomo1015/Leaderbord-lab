@@ -21,10 +21,15 @@ services:
       - "6379:6379"
     # ★実験1の初期状態：永続化を完全オフ（RDBもAOFも無効）
     #   実験1後半で下記をコメントアウトして永続化を有効化していく。
-    command: redis-server --save "" --appendonly no
+    #command: redis-server --save "" --appendonly no
     #command: redis-server --save "60 1000"
     #command: redis-server --appendonly yes --appendfsync everysec
     #command: redis-server --appendonly yes --appendfsync always
+    # 実験2 メモリ・データ量の実験
+    # メモリ以上の新規書き込みをエラーで弾く
+    #command: redis-server --save "" --appendonly no --maxmemory 3mb --maxmemory-policy noeviction
+    command: redis-server --save "" --appendonly no --maxmemory 3mb --maxmemory-policy allkeys-lru
+
     volumes:
       - redis-data:/data
 
