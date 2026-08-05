@@ -33,6 +33,16 @@ services:
     volumes:
       - redis-data:/data
 
+    # ★実験4（レプリケーション）用のレプリカ。実験1〜3では使わない（無害だが不要）。
+    #   redis を primary として複製する。直接覗くときは 6380 ポート。
+  redis-replica:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    command: redis-server --replicaof redis 6379 --save "" --appendonly no
+    depends_on:
+      - redis
+
 volumes:
   redis-data:
   go-mod-cache:
