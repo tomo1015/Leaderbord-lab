@@ -1,136 +1,165 @@
+// 実験A：大量の同時アクセスを捌く（単一ノードの限界を測る）。
+//
+// 並行度(goroutine数)を段階的に上げながら、各段階で rps とレイテンシ分布
+// (p50/p99/p999/max) を測る。-heavy を付けると測定中に重いコマンド(ZRANGE 0 -1)を
+// 定期的に差し込み、実験5の head-of-line blocking が同時アクセス下でテールをどう
+// 悪化させるかを観察できる。
+//
+// 実行例:
+//
+//	docker compose exec app go run ./cmd/load -op read -c 1,8,32,128,512 -d 3s
+//	docker compose exec app go run ./cmd/load -op read -c 1,8,32,128,512 -d 3s -heavy
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-
-	"leaderboard-lab/internal/leaderboard"
 )
 
+const globalKey = "leaderboard:global"
+
 func main() {
-	seedN := flag.Int("seed", 0, "指定件数のランダムユーザーを投入して終了する")
-	withCountry := flag.Bool("country", false, "seed 時に各ユーザーへランダムな国を割り当て、国別キーにも二重書き込みする")
+	addr := envOr("REDIS_ADDR", "localhost:6379")
+	dur := flag.Duration("d", 3*time.Second, "各並行度での測定時間")
+	levelsCSV := flag.String("c", "1,8,32,128,512", "並行度(goroutine数)のスイープ、カンマ区切り")
+	op := flag.String("op", "read", "操作: read(上位10取得 ZREVRANGE 0 9) / write(ZINCRBY)")
+	heavy := flag.Bool("heavy", false, "測定中に重いコマンド(ZRANGE 0 -1)を定期的に差し込む")
 	flag.Parse()
 
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
+	levels := parseLevels(*levelsCSV)
+	maxC := 1
+	for _, l := range levels {
+		if l > maxC {
+			maxC = l
+		}
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	board := leaderboard.New(rdb)
-	ctx := context.Background()
 
-	// -seed が指定されたら投入だけして終了（実験2・負荷観察の弾込め用）
-	if *seedN > 0 {
-		seed(ctx, board, *seedN, *withCountry)
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		PoolSize: maxC + 16, // 並行度ぶんの接続を確保（プール枯渇でクライアント側が詰まるのを防ぐ）
+	})
+	ctx := context.Background()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Fatalf("redis接続失敗: %v", err)
+	}
+	card, _ := rdb.ZCard(ctx, globalKey).Result()
+	fmt.Printf("対象キー %s のメンバー数: %d\n", globalKey, card)
+	fmt.Printf("操作: %s / 各%v測定 / heavy注入: %v\n\n", *op, *dur, *heavy)
+
+	fmt.Printf("%-8s %-12s %-9s %-9s %-9s %-9s\n", "並行度", "rps", "p50(ms)", "p99(ms)", "p999(ms)", "max(ms)")
+	fmt.Println(strings.Repeat("-", 62))
+	for _, c := range levels {
+		rps, p50, p99, p999, mx := runLevel(ctx, rdb, c, *dur, *op, *heavy)
+		fmt.Printf("%-8d %-12.0f %-9.2f %-9.2f %-9.2f %-9.2f\n", c, rps, p50, p99, p999, mx)
+	}
+}
+
+func runLevel(ctx context.Context, rdb *redis.Client, c int, d time.Duration, op string, heavy bool) (rps, p50, p99, p999, mx float64) {
+	perWorker := make([][]time.Duration, c)
+	deadline := time.Now().Add(d)
+
+	stopHeavy := make(chan struct{})
+	if heavy {
+		go func() {
+			t := time.NewTicker(200 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopHeavy:
+					return
+				case <-t.C:
+					_, _ = rdb.ZRange(ctx, globalKey, 0, -1).Result() // 重い1本
+				}
+			}
+		}()
+	}
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < c; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
+			var lat []time.Duration
+			for time.Now().Before(deadline) {
+				t0 := time.Now()
+				doOp(ctx, rdb, op, r)
+				lat = append(lat, time.Since(t0))
+			}
+			perWorker[id] = lat
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	if heavy {
+		close(stopHeavy)
+	}
+
+	var all []time.Duration
+	for _, w := range perWorker {
+		all = append(all, w...)
+	}
+	total := len(all)
+	rps = float64(total) / elapsed.Seconds()
+	if total == 0 {
 		return
 	}
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"ok": true, "try": "/leaderboard"})
-	})
-
-	mux.HandleFunc("GET /leaderboard", func(w http.ResponseWriter, r *http.Request) {
-		count, err := board.Count(ctx)
-		if err != nil {
-			httpErr(w, err)
-			return
-		}
-		top, err := board.Top(ctx, 10)
-		if err != nil {
-			httpErr(w, err)
-			return
-		}
-		writeJSON(w, map[string]any{"count": count, "top": top})
-	})
-
-	mux.HandleFunc("POST /leaderboard/score", func(w http.ResponseWriter, r *http.Request) {
-		user := r.FormValue("user")
-		country := r.FormValue("country") // 任意。あれば国別キーにも二重書き込み
-		points, err := strconv.ParseFloat(r.FormValue("points"), 64)
-		if user == "" || err != nil {
-			http.Error(w, `{"error":"user と数値の points が必要"}`, http.StatusBadRequest)
-			return
-		}
-		var score float64
-		if country != "" {
-			score, err = board.AddScoreWithCountry(ctx, user, country, points)
-		} else {
-			score, err = board.AddScore(ctx, user, points)
-		}
-		if err != nil {
-			httpErr(w, err)
-			return
-		}
-		rank, err := board.RankOf(ctx, user)
-		if err != nil {
-			httpErr(w, err)
-			return
-		}
-		writeJSON(w, map[string]any{"user": user, "country": country, "score": score, "rank": rank})
-	})
-
-	// 国別の上位10件。専用キーから引くので件数に不感で O(log N)。
-	mux.HandleFunc("GET /leaderboard/country/{country}", func(w http.ResponseWriter, r *http.Request) {
-		country := r.PathValue("country")
-		top, err := board.TopCountry(ctx, country, 10)
-		if err != nil {
-			httpErr(w, err)
-			return
-		}
-		writeJSON(w, map[string]any{"country": country, "top": top})
-	})
-
-	log.Println("listening on :8000")
-	log.Fatal(http.ListenAndServe(":8000", mux))
+	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+	p50 = msOf(pct(all, 0.50))
+	p99 = msOf(pct(all, 0.99))
+	p999 = msOf(pct(all, 0.999))
+	mx = msOf(all[total-1])
+	return
 }
 
-var countries = []string{"jp", "us", "kr", "de", "br"}
-
-func seed(ctx context.Context, board *leaderboard.Service, n int, withCountry bool) {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	dist := map[string]int{}
-	for i := 1; i <= n; i++ {
-		user := "user:" + strconv.Itoa(i)
-		pts := float64(r.Intn(1_000_001))
-		var err error
-		if withCountry {
-			c := countries[r.Intn(len(countries))]
-			dist[c]++
-			_, err = board.AddScoreWithCountry(ctx, user, c, pts)
-		} else {
-			_, err = board.AddScore(ctx, user, pts)
-		}
-		if err != nil {
-			log.Fatal(err)
-		}
-		if i%10000 == 0 {
-			log.Printf("seeded %d...", i)
-		}
-	}
-	count, _ := board.Count(ctx)
-	log.Printf("投入完了: 全体 %d 件", count)
-	if withCountry {
-		log.Printf("国別の内訳: %v", dist)
+func doOp(ctx context.Context, rdb *redis.Client, op string, r *rand.Rand) {
+	switch op {
+	case "write":
+		_ = rdb.ZIncrBy(ctx, globalKey, float64(r.Intn(100)), "user:"+strconv.Itoa(r.Intn(100000)+1)).Err()
+	default: // read
+		_, _ = rdb.ZRevRangeWithScores(ctx, globalKey, 0, 9).Result()
 	}
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+func pct(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(p * float64(len(sorted)-1))
+	return sorted[idx]
 }
 
-func httpErr(w http.ResponseWriter, err error) {
-	http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+func msOf(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func parseLevels(s string) []int {
+	var out []int
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if n, err := strconv.Atoi(p); err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		out = []int{1}
+	}
+	return out
 }
