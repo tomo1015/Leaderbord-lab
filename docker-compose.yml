@@ -43,6 +43,15 @@ services:
     depends_on:
       - redis
 
+    # ★発展B（読み分散）用の2台目レプリカ。読み容量を台数ぶん増やす検証に使う。
+  redis-replica-2:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    command: redis-server --replicaof redis 6379 --save "" --appendonly no
+    depends_on:
+      - redis
+
 volumes:
   redis-data:
   go-mod-cache:

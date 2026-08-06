@@ -1,0 +1,88 @@
+# 発展B②：Redis Cluster（3プライマリ + 3レプリカ）
+#
+# 使い方:
+#   docker compose -f cluster/docker-compose.yml up -d
+#   # init が自動でクラスタを組む。数秒待ってから:
+#   docker compose -f cluster/docker-compose.yml exec redis-node-1 redis-cli -p 6379 cluster info
+#   docker compose -f cluster/docker-compose.yml exec redis-node-1 redis-cli -c -p 6379 set foo bar
+#
+# ポイント: Cluster はノード同士が IP を交換するため、Docker では各ノードに固定IPを振り、
+#   --cluster-announce-ip でそのIPを名乗らせる必要がある（ホスト名では動かない）。
+
+services:
+  redis-node-1:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.11 --save "" --appendonly no
+    ports: ["7000:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.11
+
+  redis-node-2:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.12 --save "" --appendonly no
+    ports: ["7001:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.12
+
+  redis-node-3:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.13 --save "" --appendonly no
+    ports: ["7002:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.13
+
+  redis-node-4:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.14 --save "" --appendonly no
+    ports: ["7003:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.14
+
+  redis-node-5:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.15 --save "" --appendonly no
+    ports: ["7004:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.15
+
+  redis-node-6:
+    image: redis:7-alpine
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000 --cluster-announce-ip 173.28.5.16 --save "" --appendonly no
+    ports: ["7005:6379"]
+    networks:
+      clusternet:
+        ipv4_address: 173.28.5.16
+
+  # 全ノード起動後に一度だけ走ってクラスタを組成する
+  cluster-init:
+    image: redis:7-alpine
+    depends_on:
+      - redis-node-1
+      - redis-node-2
+      - redis-node-3
+      - redis-node-4
+      - redis-node-5
+      - redis-node-6
+    entrypoint:
+      - sh
+      - -c
+      - >
+        sleep 5 &&
+        redis-cli --cluster create
+        173.28.5.11:6379 173.28.5.12:6379 173.28.5.13:6379
+        173.28.5.14:6379 173.28.5.15:6379 173.28.5.16:6379
+        --cluster-replicas 1 --cluster-yes
+    networks:
+      - clusternet
+
+networks:
+  clusternet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 173.28.5.0/24
