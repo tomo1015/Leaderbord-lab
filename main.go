@@ -16,6 +16,8 @@ import (
 	"leaderboard-lab/internal/leaderboard"
 )
 
+var dashboradHTML []byte
+
 func main() {
 	seedN := flag.Int("seed", 0, "指定件数のランダムユーザーを投入して終了する")
 	withCountry := flag.Bool("country", false, "seed 時に各ユーザーへランダムな国を割り当て、国別キーにも二重書き込みする")
@@ -39,6 +41,12 @@ func main() {
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "try": "/leaderboard"})
+	})
+
+	//ダッシュボード（1枚のHTMLを埋め込み配信。同一オリジンのためCORS不要）
+	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(dashboradHTML)
 	})
 
 	mux.HandleFunc("GET /leaderboard", func(w http.ResponseWriter, r *http.Request) {

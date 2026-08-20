@@ -68,7 +68,21 @@ docker compose exec redis redis-cli
 | メソッド | パス | 説明 |
 |------|------|------|
 | GET  | `/leaderboard` | 件数 + 上位10件 |
+| GET  | `/leaderboard/country/{c}` | 国別の上位10件（例 /leaderboard/country/jp) |
 | POST | `/leaderboard/score` | `user`, `points`(数値) を加算。原子操作(ZINCRBY) |
+| GET  | `/dashboard` | リアルタイム・ダッシュボード（HTML、2秒ごと自動更新）|
+
+## ダッシュボード（MVP）
+/dashboardに、上位ランキングを2秒ごとにポーリング更新する1枚のダッシュボードを埋め込み配信。
+HTMLはweb/index.htmlを//go:embedでバイナリに同梱しているので、追加のファイル配信設定は不要。
+同一オリジンから/leaderboardを叩くのでCORSも不要
+
+```bash
+docker compose up -d
+docker compose exec app go run .                       # 別端末でサーバ起動
+docker compose exec app go run . -seed 5000 -country   # 国別データも入れる（JP/US… タブが埋まる）
+# ブラウザで http://localhost:8000/dashboard を開く
+```
 
 ## 進め方
 
