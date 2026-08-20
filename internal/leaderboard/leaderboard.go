@@ -100,6 +100,39 @@ func (s *Service) topOf(ctx context.Context, k string, n int64) ([]Entry, error)
 	return out, nil
 }
 
+// Aroundは指定ユーザーを中心に前後 k人（計2k + 1）の窓を順位付きで返す。
+// ZRevRankで本人の順位を得て、その前後をZRevRangeで切り出す
+// 「順位で範囲指定して周辺を取る」のはZSETならでは。上位取得と同じく件数に不感（O(loh N))。
+// 未登録ならnil,nil
+func (s *Service) Around(ctx context.Context, user string, k int64) ([]Entry, error) {
+	rank, err := s.rdb.ZRevRank(ctx, key, user).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil //未登録
+	}
+	if err != nil {
+		return nil, err
+	}
+	start := rank - k
+	if start < 0 {
+		start = 0
+	}
+	stop := rank + k
+	zs, err := s.rdb.ZRevRangeWithScores(ctx, key, start, stop).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Entry, 0, len(zs))
+	for i, z := range zs {
+		out = append(out, Entry{
+			Rank:  start + int64(i) + 1, //startは0始まりindex, 順位は+1
+			User:  z.Member.(string),
+			Score: z.Score,
+		})
+	}
+
+	return out, nil
+}
+
 // RankOf は特定ユーザーの順位（1始まり）とスコア。未登録なら nil, nil。
 func (s *Service) RankOf(ctx context.Context, user string) (*Rank, error) {
 	rank, err := s.rdb.ZRevRank(ctx, key, user).Result()

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaderboard</title>
+<style>
+  :root{
+    --bg:#0e1330; --panel:#151b3d; --line:#26305f;
+    --ink:#eef1ff; --muted:#98a0c8; --gold:#f4c04a; --live:#4fd6a0;
+    --bar:#2a356e;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 600px at 80% -10%, #1b2350 0%, transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh; padding:32px 20px;
+  }
+  .wrap{max-width:760px; margin:0 auto}
+  header{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:22px; flex-wrap:wrap}
+  .eyebrow{font-size:11px; letter-spacing:.32em; text-transform:uppercase; color:var(--muted); margin:0 0 6px}
+  h1{margin:0; font-size:30px; letter-spacing:-.01em; font-weight:800}
+  .meta{display:flex; align-items:center; gap:14px; font-size:13px; color:var(--muted)}
+  .live{display:inline-flex; align-items:center; gap:7px}
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--live); box-shadow:0 0 0 0 var(--live)}
+  .dot.beat{animation:beat .9s ease-out}
+  @keyframes beat{0%{box-shadow:0 0 0 0 rgba(79,214,160,.6)}100%{box-shadow:0 0 0 10px rgba(79,214,160,0)}}
+  @media (prefers-reduced-motion: reduce){ .dot.beat{animation:none} }
+
+  .controls{display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap}
+  .controls button{
+    background:var(--panel); color:var(--muted); border:1px solid var(--line);
+    padding:7px 13px; border-radius:999px; font-size:13px; cursor:pointer; letter-spacing:.02em;
+  }
+  .controls button[aria-pressed="true"]{ color:var(--bg); background:var(--gold); border-color:var(--gold); font-weight:700 }
+
+  .stat{font-variant-numeric:tabular-nums}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden}
+  ol{list-style:none; margin:0; padding:6px}
+  li{position:relative; display:grid; grid-template-columns:44px 1fr auto; align-items:center;
+     gap:14px; padding:12px 14px; border-radius:10px; isolation:isolate}
+  li+li{margin-top:2px}
+  .bar{position:absolute; inset:0; z-index:-1; background:var(--bar); border-radius:10px; width:0;
+       transition:width .5s ease}
+  @media (prefers-reduced-motion: reduce){ .bar{transition:none} }
+  .rank{font-variant-numeric:tabular-nums; font-weight:700; color:var(--muted); text-align:right}
+  .user{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .score{font-variant-numeric:tabular-nums; font-weight:700; letter-spacing:.02em}
+  li.top .rank, li.top .score{color:var(--gold)}
+  li.top .bar{background:linear-gradient(90deg, rgba(244,192,74,.28), rgba(244,192,74,.08))}
+  li.me{box-shadow:inset 3px 0 0 var(--live)}
+  li.me .user{color:var(--live)}
+
+  .me-box{margin-bottom:14px}
+  .me-input{display:flex; gap:8px; margin-bottom:10px}
+  .me-input input{flex:1; background:var(--panel); border:1px solid var(--line); color:var(--ink);
+    padding:9px 12px; border-radius:10px; font-size:14px; font-family:inherit}
+  .me-input input::placeholder{color:var(--muted)}
+  .me-input button{background:var(--live); color:#062a1e; border:0; padding:9px 16px; border-radius:10px;
+    font-weight:700; cursor:pointer}
+  .me-label{font-size:11px; letter-spacing:.28em; text-transform:uppercase; color:var(--muted); margin:0 0 8px 4px}
+
+  .empty,.err{padding:26px 16px; text-align:center; color:var(--muted); font-size:14px}
+  .err{color:#ff9a9a}
+  footer{margin-top:16px; font-size:12px; color:var(--muted); text-align:center}
+  code{background:var(--panel); border:1px solid var(--line); padding:1px 6px; border-radius:6px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <p class="eyebrow">Redis · sorted set</p>
+        <h1>Leaderboard</h1>
+      </div>
+      <div class="meta">
+        <span class="stat"><b id="count">–</b> players</span>
+        <span class="live"><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
+      </div>
+    </header>
+
+    <div class="me-box">
+      <div class="me-input">
+        <input id="meInput" placeholder="あなたのユーザーID（例: user:1814）" autocomplete="off">
+        <button id="meBtn">Track</button>
+      </div>
+      <div id="mePanelWrap" hidden>
+        <p class="me-label">You · 前後2人</p>
+        <div class="panel"><ol id="mePanel"></ol></div>
+      </div>
+    </div>
+
+    <div class="controls" id="scopes">
+      <button data-scope="global" aria-pressed="true">Global</button>
+      <button data-scope="jp">JP</button>
+      <button data-scope="us">US</button>
+      <button data-scope="kr">KR</button>
+      <button data-scope="de">DE</button>
+      <button data-scope="br">BR</button>
+    </div>
+
+    <div class="panel">
+      <ol id="board"><li class="empty">loading…</li></ol>
+    </div>
+
+    <footer>auto-refresh every 2s · scope from <code>/leaderboard</code> &amp; <code>/leaderboard/country/{c}</code></footer>
+  </div>
+
+<script>
+  const boardEl = document.getElementById('board');
+  const countEl = document.getElementById('count');
+  const statusEl = document.getElementById('status');
+  const dotEl = document.getElementById('dot');
+  let scope = 'global';
+
+  document.getElementById('scopes').addEventListener('click', (e) => {
+    const btn = e.target.closest('button'); if(!btn) return;
+    scope = btn.dataset.scope;
+    for (const b of e.currentTarget.children) b.setAttribute('aria-pressed', String(b === btn));
+    refresh();
+  });
+
+  function fmt(n){ return Math.round(n).toLocaleString('en-US'); }
+
+  function rowHTML(r, max, meUser){
+    const cls = [r.rank===1?'top':'', (meUser && r.user===meUser)?'me':''].join(' ').trim();
+    return `<li class="${cls}">
+      <span class="bar" style="width:${Math.max(4, (r.score/max)*100)}%"></span>
+      <span class="rank">${r.rank}</span>
+      <span class="user" title="${r.user}">${r.user}</span>
+      <span class="score">${fmt(r.score)}</span>
+    </li>`;
+  }
+
+  function render(rows){
+    if(!rows || rows.length === 0){ boardEl.innerHTML = '<li class="empty">no players yet — POST a score</li>'; return; }
+    const max = rows[0].score || 1;
+    boardEl.innerHTML = rows.map(r => rowHTML(r, max, me)).join('');
+  }
+
+  // 個人ビュー
+  const meInput = document.getElementById('meInput');
+  const meBtn = document.getElementById('meBtn');
+  const mePanel = document.getElementById('mePanel');
+  const mePanelWrap = document.getElementById('mePanelWrap');
+  let me = '';
+
+  function setMe(){ me = meInput.value.trim(); mePanelWrap.hidden = !me; if(me) refreshMe(); }
+  meBtn.addEventListener('click', setMe);
+  meInput.addEventListener('keydown', e => { if(e.key==='Enter') setMe(); });
+
+  async function refreshMe(){
+    if(!me) return;
+    try{
+      const res = await fetch(`/leaderboard/me/${encodeURIComponent(me)}`, {cache:'no-store'});
+      const data = await res.json();
+      if(!data.found || !data.around){
+        mePanel.innerHTML = `<li class="empty">「${me}」はまだランキングに居ません</li>`;
+        return;
+      }
+      const max = data.around[0].score || 1; // 窓の先頭が窓内の最大
+      mePanel.innerHTML = data.around.map(r => rowHTML(r, max, me)).join('');
+    }catch(err){
+      mePanel.innerHTML = `<li class="err">取得失敗: ${err.message}</li>`;
+    }
+  }
+
+  function beat(ok){
+    dotEl.style.background = ok ? 'var(--live)' : '#ff8080';
+    dotEl.classList.remove('beat'); void dotEl.offsetWidth; dotEl.classList.add('beat');
+  }
+
+  async function refresh(){
+    const url = scope === 'global' ? '/leaderboard' : `/leaderboard/country/${scope}`;
+    try{
+      const res = await fetch(url, {cache:'no-store'});
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const data = await res.json();
+      render(data.top);
+      if(scope === 'global' && typeof data.count === 'number') countEl.textContent = fmt(data.count);
+      statusEl.textContent = 'live · ' + new Date().toLocaleTimeString();
+      beat(true);
+    }catch(err){
+      statusEl.textContent = 'reconnecting… ('+err.message+')';
+      beat(false);
+    }
+  }
+
+  function tick(){ refresh(); refreshMe(); }
+  tick();
+  setInterval(tick, 2000);
+</script>
+</body>
+</html>

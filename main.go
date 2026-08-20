@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"log"
@@ -16,7 +17,8 @@ import (
 	"leaderboard-lab/internal/leaderboard"
 )
 
-var dashboradHTML []byte
+//go:embed web/index.html
+var dashboardHTML []byte
 
 func main() {
 	seedN := flag.Int("seed", 0, "指定件数のランダムユーザーを投入して終了する")
@@ -40,13 +42,13 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"ok": true, "try": "/leaderboard"})
+		writeJSON(w, map[string]any{"ok": true, "api": "/leaderboard", "dashboard": "/dashboard"})
 	})
 
-	//ダッシュボード（1枚のHTMLを埋め込み配信。同一オリジンのためCORS不要）
+	// ダッシュボード（1枚のHTMLを埋め込み配信。同一オリジンなので CORS 不要）
 	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(dashboradHTML)
+		_, _ = w.Write(dashboardHTML)
 	})
 
 	mux.HandleFunc("GET /leaderboard", func(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +89,17 @@ func main() {
 			return
 		}
 		writeJSON(w, map[string]any{"user": user, "country": country, "score": score, "rank": rank})
+	})
+
+	// 個人ビュー：指定ユーザーを中心に前後2人（計5人）の窓を返す。
+	mux.HandleFunc("GET /leaderboard/me/{user}", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		around, err := board.Around(ctx, user, 2)
+		if err != nil {
+			httpErr(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"user": user, "found": around != nil, "around": around})
 	})
 
 	// 国別の上位10件。専用キーから引くので件数に不感で O(log N)。
